@@ -1,6 +1,6 @@
 # Data Anonymizer
 
-A Streamlit web application that intelligently anonymizes Excel data while preserving data types and realistic value ranges. Ideal for preparing data before sharing with AI tools — replace sensitive information with realistic fake data so you can leverage AI assistance without exposing personal or confidential records.
+A Streamlit web application that intelligently anonymizes Excel data while preserving data types and realistic value ranges. Ideal for preparing data before sharing with AI tools — replace sensitive information with realistic fake data so you can leverage AI assistance without exposing personal or confidential records. Try it out at: [https://dataanonymizer.streamlit.app/](https://dataanonymizer.streamlit.app/)
 
 ## Features
 
