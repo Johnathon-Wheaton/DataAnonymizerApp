@@ -15,7 +15,8 @@ fake = Faker()
 ALL_DATA_TYPES = [
     'leave_unchanged',
     'text',
-    'name',
+    'name (person)',
+    'name (header + alphabet)',
     'email',
     'phone',
     'username',
@@ -145,7 +146,7 @@ class DataAnonymizer:
 
         # Check column name for hints
         if any(term in col_lower for term in ['name', 'first', 'last', 'fname', 'lname']):
-            return 'name'
+            return 'name (person)'
         elif any(term in col_lower for term in ['address', 'street', 'addr']):
             return 'address'
         elif any(term in col_lower for term in ['city', 'town']):
@@ -183,7 +184,7 @@ class DataAnonymizer:
             avg_len = sample_str.str.len().mean()
             # Multi-word, moderate length → likely names (not long descriptions)
             if 2 <= avg_words <= 4 and avg_len < 40:
-                return 'name'
+                return 'name (person)'
             # Long multi-word text → descriptions/comments
             elif avg_words > 4 or avg_len >= 40:
                 return 'text'
@@ -247,8 +248,10 @@ class DataAnonymizer:
             result[non_null_mask] = series[non_null_mask].apply(lambda x: self.fake.email())
         elif data_type == 'phone':
             result[non_null_mask] = series[non_null_mask].apply(lambda x: self.fake.phone_number())
-        elif data_type == 'name':
+        elif data_type == 'name (person)':
             result[non_null_mask] = series[non_null_mask].apply(lambda x: self.fake.name())
+        elif data_type == 'name (header + alphabet)':
+            result[non_null_mask] = self._anonymize_header_alphabet(series[non_null_mask])
         elif data_type == 'address':
             result[non_null_mask] = series[non_null_mask].apply(lambda x: self.fake.street_address())
         elif data_type == 'city':
@@ -272,15 +275,19 @@ class DataAnonymizer:
         elif data_type == 'id':
             result[non_null_mask] = series[non_null_mask].apply(lambda x: self.fake.uuid4())
         elif data_type == 'boolean':
-            # Preserve the same set of values, just shuffle them
-            values = series[non_null_mask].values.copy()
-            np.random.shuffle(values)
-            result[non_null_mask] = values
+            values = series[non_null_mask]
+            unique_vals = list(values.unique())
+            shuffled = values.values.copy()
+            np.random.shuffle(shuffled)
+            noised = self._add_distribution_noise(pd.Series(shuffled, index=values.index), unique_vals)
+            result[non_null_mask] = noised.values
         elif data_type == 'categorical':
-            # Shuffle categorical values to preserve distribution
-            values = series[non_null_mask].values.copy()
-            np.random.shuffle(values)
-            result[non_null_mask] = values
+            values = series[non_null_mask]
+            unique_vals = list(values.unique())
+            shuffled = values.values.copy()
+            np.random.shuffle(shuffled)
+            noised = self._add_distribution_noise(pd.Series(shuffled, index=values.index), unique_vals)
+            result[non_null_mask] = noised.values
         elif data_type == 'currency':
             result[non_null_mask] = self._anonymize_currency(series[non_null_mask])
         elif data_type == 'url':
@@ -468,6 +475,40 @@ class DataAnonymizer:
         
         return '|'.join(location_parts) if location_parts else None
     
+    def _anonymize_header_alphabet(self, series):
+        """Anonymize by mapping unique values to 'Header A', 'Header B', etc.
+        Adds distribution noise so frequencies can't be used to reverse-engineer."""
+        header = series.name if series.name else 'Value'
+        unique_vals = list(series.unique())
+        # Generate labels: A-Z, then AA, AB, ... AZ, BA, etc.
+        labels = []
+        for i in range(len(unique_vals)):
+            if i < 26:
+                labels.append(f"{header} {chr(65 + i)}")
+            else:
+                labels.append(f"{header} {chr(65 + (i // 26) - 1)}{chr(65 + (i % 26))}")
+        # Map values to labels, then randomly reassign ~10% of rows
+        mapping = {val: label for val, label in zip(unique_vals, labels)}
+        result = series.map(mapping)
+        if len(labels) > 1:
+            result = self._add_distribution_noise(result, labels)
+        return result
+
+    def _add_distribution_noise(self, series, possible_values, noise_rate=0.10):
+        """Randomly reassign ~noise_rate of rows to a different value from the pool.
+        This prevents frequency analysis from reverse-engineering the mapping."""
+        if len(possible_values) < 2:
+            return series
+        result = series.copy()
+        mask = np.random.random(len(result)) < noise_rate
+        noise_indices = result.index[mask]
+        for idx in noise_indices:
+            # Pick a different value than the current one
+            current = result[idx]
+            others = [v for v in possible_values if v != current]
+            result.at[idx] = random.choice(others)
+        return result
+
     def _anonymize_date_of_birth(self, series):
         """Anonymize dates of birth with realistic ages (18-90 years)"""
         today = datetime.today()
@@ -588,27 +629,30 @@ def main():
                 st.subheader("Review & Adjust Data Types")
                 st.caption("Adjust any misdetected types using the dropdowns, then click Anonymize.")
 
-                # Build the override grid
-                user_types = {}
-                for col in df.columns:
-                    c1, c2, c3 = st.columns([2, 2, 3])
-                    with c1:
-                        st.markdown(f"**{col}**")
-                    with c2:
-                        default_idx = ALL_DATA_TYPES.index(detected[col]) if detected[col] in ALL_DATA_TYPES else 0
-                        user_types[col] = st.selectbox(
-                            f"Type for {col}",
-                            ALL_DATA_TYPES,
-                            index=default_idx,
-                            key=f"dtype_{col}",
-                            label_visibility="collapsed",
-                        )
-                    with c3:
-                        sample = ', '.join(df[col].dropna().astype(str).head(3).tolist())
-                        st.text(sample[:80] + ('...' if len(sample) > 80 else ''))
+                # Wrap dropdowns + button in a form so changes don't trigger reruns
+                with st.form("type_overrides"):
+                    user_types = {}
+                    for col in df.columns:
+                        c1, c2, c3 = st.columns([2, 2, 3])
+                        with c1:
+                            st.markdown(f"**{col}**")
+                        with c2:
+                            default_idx = ALL_DATA_TYPES.index(detected[col]) if detected[col] in ALL_DATA_TYPES else 0
+                            user_types[col] = st.selectbox(
+                                f"Type for {col}",
+                                ALL_DATA_TYPES,
+                                index=default_idx,
+                                key=f"dtype_{col}",
+                                label_visibility="collapsed",
+                            )
+                        with c3:
+                            sample = ', '.join(df[col].dropna().astype(str).head(3).tolist())
+                            st.text(sample[:80] + ('...' if len(sample) > 80 else ''))
+
+                    submitted = st.form_submit_button("Anonymize Data")
 
                 # --- Step 3: Anonymize with confirmed types ---
-                if st.button("Anonymize Data"):
+                if submitted:
                     anonymizer = DataAnonymizer()
                     progress_bar = st.progress(0)
                     status_text = st.empty()
